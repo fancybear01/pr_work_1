@@ -4,6 +4,8 @@ import os
 import platform
 import getpass
 import argparse
+import base64
+import zipfile
 
 class ShellEmulator(tk.Tk):
     def __init__(self, vfs_path=None, startup_script=None):
@@ -11,11 +13,18 @@ class ShellEmulator(tk.Tk):
         
         self.vfs_path = vfs_path
         self.startup_script = startup_script
+        
+        self.vfs = {} 
+        self.current_vfs_dir = "/"  
+        
         self.history = []
         self.history_index = -1
         
         self._setup_ui()
         self._display_welcome()
+        
+        if vfs_path:
+            self._load_vfs(vfs_path)
         
         if startup_script:
             self.after(100, self._run_startup_script)
@@ -107,13 +116,79 @@ class ShellEmulator(tk.Tk):
         command, args = parts[0], parts[1:]
         
         if command == "ls":
-            self._display_output(f"ls: {args}")
+            self._command_ls(args)
         elif command == "cd":
-            self._display_output(f"cd: {args}" if args else "cd: missing argument")
+            self._command_cd(args)
+        elif command == "vfs-init":
+            self._command_vfs_init(args)
         elif command == "exit":
             self.quit()
         else:
             self._display_output(f"Command not found: {command}")
+
+    def _command_vfs_init(self, args):
+        self.vfs = {}
+        self.current_vfs_dir = "/"
+        self._display_output("VFS initialized to empty state")
+        
+        if self.vfs_path and os.path.exists(self.vfs_path):
+            os.remove(self.vfs_path)
+            self._display_output(f"Physical VFS file removed: {self.vfs_path}")
+
+    def _command_ls(self, args):
+        if not self.vfs:
+            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+            return
+        
+        dir_contents = []
+        current_dir = self.current_vfs_dir.rstrip('/') + '/'
+        
+        for path in self.vfs.keys():
+            if path.startswith(current_dir) and path != current_dir:
+                rel_path = path[len(current_dir):]
+                if '/' in rel_path:
+                    name = rel_path.split('/')[0]
+                    if name and name not in dir_contents:
+                        dir_contents.append(name)
+                else:
+                    dir_contents.append(rel_path)
+        
+        if dir_contents:
+            self._display_output(" ".join(dir_contents))
+        else:
+            self._display_output("(empty directory)")
+
+    def _command_cd(self, args):
+        if not self.vfs:
+            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+            return
+        
+        if not args:
+            self._display_output("cd: missing argument")
+            return
+        
+        target_dir = args[0]
+        
+        if target_dir.startswith('/'):
+            new_dir = target_dir
+        else:
+            current_dir = self.current_vfs_dir.rstrip('/') + '/'
+            new_dir = os.path.join(current_dir, target_dir).replace('\\', '/')
+        
+        if not new_dir.endswith('/'):
+            new_dir += '/'
+        
+        dir_exists = False
+        for path in self.vfs.keys():
+            if path == new_dir.rstrip('/') or path.startswith(new_dir):
+                dir_exists = True
+                break
+        
+        if dir_exists:
+            self.current_vfs_dir = new_dir
+            self._display_output(f"Changed VFS directory to {new_dir}")
+        else:
+            self._display_output(f"cd: {target_dir}: No such directory in VFS")
 
     def _run_startup_script(self):
         try:
@@ -127,6 +202,60 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"Error executing script: {e}")
         
         self._display_prompt()
+        
+    def _load_vfs(self, zip_path):
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                
+                all_paths = zip_ref.namelist()
+                if not all_paths:
+                    self._display_output("Empty VFS archive")
+                    return
+                
+                common_prefix = os.path.commonprefix(all_paths)
+                if common_prefix and not common_prefix.endswith('/'):
+                    common_prefix = common_prefix.rsplit('/', 1)[0] + '/'
+                
+                self._display_output(f"Common prefix: '{common_prefix}'")
+                
+                for file_info in zip_ref.infolist():
+                    file_path = file_info.filename
+                    if common_prefix and file_path.startswith(common_prefix):
+                        file_path = file_path[len(common_prefix):]
+                    
+                    if not file_path:
+                        continue
+                    
+                    if file_info.is_dir():
+                        self.vfs[file_path] = {
+                            'type': 'directory'
+                        }
+                    else:
+                        with zip_ref.open(file_info) as file:
+                            content = file.read()
+                            
+                        try:
+                            content_str = content.decode('utf-8')
+                            self.vfs[file_info.filename] = {
+                                'type': 'file',
+                                'content': content_str,
+                                'is_binary': False
+                            }
+                        except UnicodeDecodeError:
+                            content_b64 = base64.b64encode(content).decode('utf-8')
+                            self.vfs[file_info.filename] = {
+                                'type': 'file',
+                                'content': content_b64,
+                                'is_binary': True
+                            }
+            
+            self._display_output(f"VFS loaded from {zip_path}")
+            self._display_output(f"Files in VFS: {list(self.vfs.keys())}")
+            
+        except FileNotFoundError:
+            self._display_output(f"Error: VFS file not found: {zip_path}")
+        except zipfile.BadZipFile:
+            self._display_output(f"Error: Invalid ZIP format: {zip_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Shell Emulator')
