@@ -6,6 +6,7 @@ import getpass
 import argparse
 import base64
 import zipfile
+import fnmatch  
 
 class ShellEmulator(tk.Tk):
     def __init__(self, vfs_path=None, startup_script=None):
@@ -15,7 +16,7 @@ class ShellEmulator(tk.Tk):
         self.startup_script = startup_script
         
         self.vfs = {} 
-        self.current_vfs_dir = "/"  
+        self.current_vfs_dir = ""  
         
         self.history = []
         self.history_index = -1
@@ -40,12 +41,12 @@ class ShellEmulator(tk.Tk):
             self, state='disabled', wrap='word', 
             bg='black', fg='white', font=('Consolas', 12)
         )
-        self.output_area.pack(expand=True, fill='both', padx=5, pady=5)
+        self.output_area.pack(expand=True, fill='both', padx=0, pady=0)
         
         # Input
         input_frame = tk.Frame(self, bg='black')
-        input_frame.pack(fill='x', padx=5, pady=5)
-        
+        input_frame.pack(fill='x', padx=0, pady=0)
+
         tk.Label(input_frame, text=">", fg='white', bg='black', font=('Consolas', 12)).pack(side='left')
         
         self.input_entry = tk.Entry(
@@ -77,7 +78,7 @@ class ShellEmulator(tk.Tk):
     def _display_prompt(self):
         self.input_entry.delete(0, tk.END)
         self.output_area.config(state='normal')
-        self.output_area.insert(tk.END, "> ")
+        ##self.output_area.insert(tk.END, "> ")
         self.output_area.config(state='disabled')
         self.output_area.see(tk.END)
 
@@ -123,6 +124,10 @@ class ShellEmulator(tk.Tk):
             self._command_vfs_init(args)
         elif command == "exit":
             self.quit()
+        elif command == "find":
+            self._command_find(args)
+        elif command == "pwd":  
+            self._command_pwd(args)
         else:
             self._display_output(f"Command not found: {command}")
 
@@ -140,8 +145,11 @@ class ShellEmulator(tk.Tk):
             self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
             return
         
+        current_dir = self.current_vfs_dir
+        if not current_dir.endswith('/') and current_dir:
+            current_dir += '/'
+        
         dir_contents = []
-        current_dir = self.current_vfs_dir.rstrip('/') + '/'
         
         for path in self.vfs.keys():
             if path.startswith(current_dir) and path != current_dir:
@@ -151,7 +159,8 @@ class ShellEmulator(tk.Tk):
                     if name and name not in dir_contents:
                         dir_contents.append(name)
                 else:
-                    dir_contents.append(rel_path)
+                    if rel_path and rel_path not in dir_contents:
+                        dir_contents.append(rel_path)
         
         if dir_contents:
             self._display_output(" ".join(dir_contents))
@@ -170,17 +179,21 @@ class ShellEmulator(tk.Tk):
         target_dir = args[0]
         
         if target_dir.startswith('/'):
-            new_dir = target_dir
+            new_dir = target_dir[1:]
         else:
-            current_dir = self.current_vfs_dir.rstrip('/') + '/'
-            new_dir = os.path.join(current_dir, target_dir).replace('\\', '/')
+            current_dir = self.current_vfs_dir
+            if not current_dir.endswith('/') and current_dir:
+                current_dir += '/'
+            new_dir = current_dir + target_dir
         
         if not new_dir.endswith('/'):
-            new_dir += '/'
+            dir_check = new_dir + '/'
+            if any(path.startswith(dir_check) for path in self.vfs.keys()):
+                new_dir += '/'
         
         dir_exists = False
         for path in self.vfs.keys():
-            if path == new_dir.rstrip('/') or path.startswith(new_dir):
+            if path == new_dir or path.startswith(new_dir):
                 dir_exists = True
                 break
         
@@ -189,7 +202,73 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"Changed VFS directory to {new_dir}")
         else:
             self._display_output(f"cd: {target_dir}: No such directory in VFS")
+    
+    def _command_find(self, args):
+        if not self.vfs:
+            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+            return
 
+        cur = self.current_vfs_dir
+        if cur in ('/', ''):
+            cur = ''
+        if cur and not cur.endswith('/'):
+            cur += '/'
+
+        start_dir = cur 
+        pattern = '*'
+
+        if len(args) == 1:
+            token = args[0]
+            possible_dir = token.rstrip('/') + '/'
+            if token in ('.', './'):
+                pass
+            elif token == '/':
+                start_dir = ''
+            elif any(k.startswith(possible_dir) for k in self.vfs.keys()):
+                start_dir = possible_dir
+            else:
+                pattern = token
+        elif len(args) >= 2:
+            dir_token = args[0]
+            if dir_token == '/':
+                start_dir = ''
+            elif dir_token in ('.', './'):
+                start_dir = cur
+            else:
+                start_dir = dir_token.rstrip('/') + '/'
+            pattern = args[1]
+
+        if start_dir in ('/', ''):
+            prefix = ''
+        else:
+            start_dir = start_dir.rstrip('/') + '/'
+            prefix = start_dir
+
+        results = []
+        for key in self.vfs.keys():
+            if not key.startswith(prefix):
+                continue
+            name = key[:-1] if key.endswith('/') else key
+            if '/' in name:
+                name = name.rsplit('/', 1)[1]
+            if fnmatch.fnmatch(name, pattern):
+                results.append(key)
+
+        if not results:
+            self._display_output("(no matches)")
+            return
+
+        for r in sorted(results):
+            self._display_output(r)
+            
+    def _command_pwd(self, args):
+        path = self.current_vfs_dir
+        if not path or path == '/':
+            out = '/'
+        else:
+            out = '/' + path.strip('/')
+        self._display_output(out)
+        
     def _run_startup_script(self):
         try:
             with open(self.startup_script, 'r') as f:
@@ -226,8 +305,11 @@ class ShellEmulator(tk.Tk):
                     if not file_path:
                         continue
                     
+                    key = file_path
                     if file_info.is_dir():
-                        self.vfs[file_path] = {
+                        if not key.endswith('/'):
+                            key += '/'
+                        self.vfs[key] = {
                             'type': 'directory'
                         }
                     else:
@@ -236,14 +318,14 @@ class ShellEmulator(tk.Tk):
                             
                         try:
                             content_str = content.decode('utf-8')
-                            self.vfs[file_info.filename] = {
+                            self.vfs[key] = {
                                 'type': 'file',
                                 'content': content_str,
                                 'is_binary': False
                             }
                         except UnicodeDecodeError:
                             content_b64 = base64.b64encode(content).decode('utf-8')
-                            self.vfs[file_info.filename] = {
+                            self.vfs[key] = {
                                 'type': 'file',
                                 'content': content_b64,
                                 'is_binary': True
