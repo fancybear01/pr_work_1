@@ -17,3 +17,6 @@ find folder1
 cd folder1
 cd folder4
 pwd
+chown Ivan folder4
+toucj newfile.txt
+touch folder4.txt

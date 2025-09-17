@@ -6,7 +6,8 @@ import getpass
 import argparse
 import base64
 import zipfile
-import fnmatch  
+import fnmatch 
+from datetime import datetime 
 
 class ShellEmulator(tk.Tk):
     def __init__(self, vfs_path=None, startup_script=None):
@@ -78,7 +79,6 @@ class ShellEmulator(tk.Tk):
     def _display_prompt(self):
         self.input_entry.delete(0, tk.END)
         self.output_area.config(state='normal')
-        ##self.output_area.insert(tk.END, "> ")
         self.output_area.config(state='disabled')
         self.output_area.see(tk.END)
 
@@ -128,6 +128,10 @@ class ShellEmulator(tk.Tk):
             self._command_find(args)
         elif command == "pwd":  
             self._command_pwd(args)
+        elif command == "touch":
+            self._command_touch(args)
+        elif command == "chown":
+            self._command_chown(args)
         else:
             self._display_output(f"Command not found: {command}")
 
@@ -269,6 +273,81 @@ class ShellEmulator(tk.Tk):
             out = '/' + path.strip('/')
         self._display_output(out)
         
+    def _command_touch(self, args):
+        if not self.vfs:
+            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+            return
+        if not args:
+            self._display_output("touch: missing file operand")
+            return
+        
+        target = self._resolve_vfs_path(args[0])
+        if target.endswith('/'):
+            target = target.rstrip('/')
+        if target + '/' in self.vfs:
+            self._display_output(f"touch: cannot create file '{args[0]}': Is a directory")
+            return
+        parent = target.rsplit('/', 1)[0] + '/' if '/' in target else ''
+        if parent and not any(k == parent or k.startswith(parent) for k in self.vfs.keys()):
+            self._display_output(f"touch: cannot touch '{args[0]}': No such directory in VFS")
+            return
+        now = datetime.utcnow().isoformat() + 'Z'
+        if target in self.vfs:
+            meta = self.vfs[target]
+            if meta.get('type') == 'file':
+                meta['mtime'] = now
+                self._display_output(f"touched: {target}")
+            else:
+                self._display_output(f"touch: '{args[0]}' is not a file")
+        else:
+            self.vfs[target] = {
+                'type': 'file',
+                'content': '',
+                'is_binary': False,
+                'owner': getpass.getuser(),
+                'mtime': now
+            }
+            self._display_output(f"created: {target}")
+
+    def _command_chown(self, args):
+        if not self.vfs:
+            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+            return
+        if not args or len(args) < 2:
+            self._display_output("chown: missing operand")
+            return
+        recursive = False
+        idx = 0
+        if args[0] == '-R':
+            recursive = True
+            idx = 1
+        if len(args) - idx < 2:
+            self._display_output("chown: missing owner or path")
+            return
+        owner = args[idx]
+        path_arg = args[idx + 1]
+        key = self._resolve_vfs_path(path_arg)
+        dir_key = key.rstrip('/') + '/'
+        targets = []
+        if key in self.vfs:
+            targets = [key]
+        elif dir_key in self.vfs:
+            if recursive:
+                prefix = dir_key
+                targets = [k for k in self.vfs.keys() if k == dir_key or k.startswith(prefix)]
+            else:
+                targets = [dir_key]
+        else:
+            self._display_output(f"chown: cannot access '{path_arg}': No such file or directory in VFS")
+            return
+        changed = 0
+        for k in targets:
+            meta = self.vfs.get(k)
+            if isinstance(meta, dict):
+                meta['owner'] = owner
+                changed += 1
+        self._display_output(f"chown: updated {changed} item(s)")
+
     def _run_startup_script(self):
         try:
             with open(self.startup_script, 'r') as f:
@@ -338,6 +417,25 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"Error: VFS file not found: {zip_path}")
         except zipfile.BadZipFile:
             self._display_output(f"Error: Invalid ZIP format: {zip_path}")
+    
+    def _resolve_vfs_path(self, target: str) -> str:
+        if target in ('.', './', ''):
+            return (self.current_vfs_dir or '').rstrip('/')
+        if target.startswith('/'):
+            norm = target[1:]
+        else:
+            base = (self.current_vfs_dir or '').rstrip('/')
+            norm = (base + '/' + target) if base else target
+        parts = []
+        for part in norm.split('/'):
+            if part == '' or part == '.':
+                continue
+            if part == '..':
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(part)
+        return '/'.join(parts)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Shell Emulator')
