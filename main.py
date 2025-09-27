@@ -8,10 +8,15 @@ import base64
 import zipfile
 import fnmatch 
 from datetime import datetime 
+import shlex  
+import re  
 
 class ShellEmulator(tk.Tk):
     def __init__(self, vfs_path=None, startup_script=None):
         super().__init__()
+        
+        if 'HOME' not in os.environ and 'USERPROFILE' in os.environ:
+            os.environ['HOME'] = os.environ['USERPROFILE']
         
         self.vfs_path = vfs_path
         self.startup_script = startup_script
@@ -108,12 +113,28 @@ class ShellEmulator(tk.Tk):
             self.input_entry.insert(0, self.history[self.history_index])
         return "break"
 
+    def _split_and_expand(self, command_line: str):
+        try:
+            tokens = shlex.split(command_line, posix=True)
+        except ValueError as e:
+            self._display_output(f"parse error: {e}")
+            return []
+
+        def expand_env_all(s: str) -> str:
+            s1 = os.path.expanduser(s)
+            def repl(m):
+                name = m.group(1) or m.group(2)
+                return os.environ.get(name, m.group(0))
+            s2 = re.sub(r"\$(\w+)|\$\{([^}]+)\}", repl, s1)
+            s3 = os.path.expandvars(s2)
+            return s3
+
+        return [expand_env_all(t) for t in tokens]
+
     def _execute_command(self, command_line):
-        parts = command_line.split()
+        parts = self._split_and_expand(command_line)
         if not parts:
             return
-        
-        parts = [os.path.expandvars(part) for part in parts]
         command, args = parts[0], parts[1:]
         
         if command == "ls":
@@ -133,11 +154,16 @@ class ShellEmulator(tk.Tk):
         elif command == "chown":
             self._command_chown(args)
         else:
+            raw = command_line.strip()
+            if len(parts) == 1:
+                if raw.startswith('~') or raw.startswith('$'):
+                    self._display_output(parts[0])
+                    return
             self._display_output(f"Command not found: {command}")
 
     def _command_vfs_init(self, args):
         self.vfs = {}
-        self.current_vfs_dir = "/"
+        self.current_vfs_dir = ""  
         self._display_output("VFS initialized to empty state")
         
         if self.vfs_path and os.path.exists(self.vfs_path):
@@ -145,12 +171,10 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"Physical VFS file removed: {self.vfs_path}")
 
     def _command_ls(self, args):
-        if not self.vfs:
-            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
-            return
-        
         current_dir = self.current_vfs_dir
-        if not current_dir.endswith('/') and current_dir:
+        if current_dir in ('/', ''):
+            current_dir = ''
+        elif not current_dir.endswith('/'):
             current_dir += '/'
         
         dir_contents = []
@@ -172,10 +196,6 @@ class ShellEmulator(tk.Tk):
             self._display_output("(empty directory)")
 
     def _command_cd(self, args):
-        if not self.vfs:
-            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
-            return
-        
         if not args:
             self._display_output("cd: missing argument")
             return
@@ -189,6 +209,11 @@ class ShellEmulator(tk.Tk):
             if not current_dir.endswith('/') and current_dir:
                 current_dir += '/'
             new_dir = current_dir + target_dir
+        
+        if new_dir in ('', '/'):
+            self.current_vfs_dir = ''
+            self._display_output("Changed VFS directory to /")
+            return
         
         if not new_dir.endswith('/'):
             dir_check = new_dir + '/'
@@ -208,10 +233,6 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"cd: {target_dir}: No such directory in VFS")
     
     def _command_find(self, args):
-        if not self.vfs:
-            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
-            return
-
         cur = self.current_vfs_dir
         if cur in ('/', ''):
             cur = ''
@@ -264,19 +285,17 @@ class ShellEmulator(tk.Tk):
 
         for r in sorted(results):
             self._display_output(r)
-            
+    
     def _command_pwd(self, args):
-        path = self.current_vfs_dir
-        if not path or path == '/':
-            out = '/'
-        else:
-            out = '/' + path.strip('/')
-        self._display_output(out)
-        
-    def _command_touch(self, args):
-        if not self.vfs:
-            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
+        cur = self.current_vfs_dir or ''
+        if cur in ('', '/'):
+            self._display_output('/')
             return
+        if cur.endswith('/'):
+            cur = cur[:-1]
+        self._display_output('/' + cur)
+            
+    def _command_touch(self, args):
         if not args:
             self._display_output("touch: missing file operand")
             return
@@ -310,9 +329,6 @@ class ShellEmulator(tk.Tk):
             self._display_output(f"created: {target}")
 
     def _command_chown(self, args):
-        if not self.vfs:
-            self._display_output("No VFS loaded. Use 'vfs-init' to initialize or provide VFS path at startup.")
-            return
         if not args or len(args) < 2:
             self._display_output("chown: missing operand")
             return
